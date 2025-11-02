@@ -4,6 +4,16 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>FlautПлеер - Ваша музыка</title>
+    <meta name="description" content="FlautПлеер - персонализированный музыкальный плеер">
+    <meta name="theme-color" content="#BC13FE">
+    
+    <!-- PWA Manifest -->
+    <link rel="manifest" href="manifest.json">
+    
+    <!-- Иконки для разных устройств -->
+    <link rel="icon" href="/home/dertuff/Загрузки/иконка.png" type="image/png">
+    <link rel="apple-touch-icon" href="/home/dertuff/Загрузки/иконка.png">
+    
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <style>
         :root {
@@ -763,10 +773,29 @@
         @keyframes spin {
             to { transform: rotate(360deg); }
         }
+
+        .notification {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            background: var(--neon-purple);
+            color: white;
+            padding: 15px 20px;
+            border-radius: 10px;
+            box-shadow: 0 5px 15px rgba(0,0,0,0.3);
+            z-index: 1000;
+            transform: translateX(150%);
+            transition: transform 0.3s ease;
+        }
+
+        .notification.show {
+            transform: translateX(0);
+        }
     </style>
 </head>
 <body>
     <div class="stars" id="stars"></div>
+    <div class="notification" id="notification"></div>
     
     <div class="container">
         <header>
@@ -938,6 +967,117 @@
     </div>
 
     <script>
+        // База данных IndexedDB
+        const DB_NAME = 'FlautPlayerDB';
+        const DB_VERSION = 1;
+        const USER_STORE = 'users';
+        const PLAYLIST_STORE = 'playlists';
+        let db = null;
+
+        // Инициализация базы данных
+        function initDB() {
+            return new Promise((resolve, reject) => {
+                const request = indexedDB.open(DB_NAME, DB_VERSION);
+                
+                request.onerror = () => reject(request.error);
+                request.onsuccess = () => {
+                    db = request.result;
+                    resolve(db);
+                };
+                
+                request.onupgradeneeded = (event) => {
+                    const database = event.target.result;
+                    
+                    // Создаем хранилище для пользователей
+                    if (!database.objectStoreNames.contains(USER_STORE)) {
+                        const userStore = database.createObjectStore(USER_STORE, { keyPath: 'id', autoIncrement: true });
+                        userStore.createIndex('email', 'email', { unique: true });
+                    }
+                    
+                    // Создаем хранилище для плейлистов
+                    if (!database.objectStoreNames.contains(PLAYLIST_STORE)) {
+                        const playlistStore = database.createObjectStore(PLAYLIST_STORE, { keyPath: 'id', autoIncrement: true });
+                        playlistStore.createIndex('userId', 'userId', { unique: false });
+                    }
+                };
+            });
+        }
+
+        // Функции для работы с пользователями
+        async function registerUser(userData) {
+            const transaction = db.transaction([USER_STORE], 'readwrite');
+            const store = transaction.objectStore(USER_STORE);
+            
+            return new Promise((resolve, reject) => {
+                const request = store.add(userData);
+                request.onsuccess = () => resolve(request.result);
+                request.onerror = () => reject(request.error);
+            });
+        }
+
+        async function getUserByEmail(email) {
+            const transaction = db.transaction([USER_STORE], 'readonly');
+            const store = transaction.objectStore(USER_STORE);
+            const index = store.index('email');
+            
+            return new Promise((resolve, reject) => {
+                const request = index.get(email);
+                request.onsuccess = () => resolve(request.result);
+                request.onerror = () => reject(request.error);
+            });
+        }
+
+        async function getUserById(id) {
+            const transaction = db.transaction([USER_STORE], 'readonly');
+            const store = transaction.objectStore(USER_STORE);
+            
+            return new Promise((resolve, reject) => {
+                const request = store.get(id);
+                request.onsuccess = () => resolve(request.result);
+                request.onerror = () => reject(request.error);
+            });
+        }
+
+        // Функции для работы с плейлистами
+        async function savePlaylist(userId, playlist) {
+            const transaction = db.transaction([PLAYLIST_STORE], 'readwrite');
+            const store = transaction.objectStore(PLAYLIST_STORE);
+            
+            // Сначала удаляем старый плейлист пользователя
+            const index = store.index('userId');
+            const request = index.openCursor(IDBKeyRange.only(userId));
+            
+            request.onsuccess = () => {
+                const cursor = request.result;
+                if (cursor) {
+                    cursor.delete();
+                    cursor.continue();
+                }
+            };
+            
+            // Сохраняем новый плейлист
+            return new Promise((resolve, reject) => {
+                const saveRequest = store.add({ userId, playlist, updatedAt: new Date() });
+                saveRequest.onsuccess = () => resolve(saveRequest.result);
+                saveRequest.onerror = () => reject(saveRequest.error);
+            });
+        }
+
+        async function getPlaylist(userId) {
+            const transaction = db.transaction([PLAYLIST_STORE], 'readonly');
+            const store = transaction.objectStore(PLAYLIST_STORE);
+            const index = store.index('userId');
+            
+            return new Promise((resolve, reject) => {
+                const request = index.get(userId);
+                request.onsuccess = () => {
+                    const result = request.result;
+                    resolve(result ? result.playlist : []);
+                };
+                request.onerror = () => reject(request.error);
+            });
+        }
+
         // Создание звездного фона
         function createStars() {
             const starsContainer = document.getElementById('stars');
@@ -960,6 +1100,17 @@
                 
                 starsContainer.appendChild(star);
             }
+        }
+
+        // Уведомления
+        function showNotification(message, duration = 3000) {
+            const notification = document.getElementById('notification');
+            notification.textContent = message;
+            notification.classList.add('show');
+            
+            setTimeout(() => {
+                notification.classList.remove('show');
+            }, duration);
         }
 
         // Элементы управления
@@ -1023,14 +1174,15 @@
         let selectedFiles = [];
 
         // Инициализация
-        document.addEventListener('DOMContentLoaded', function() {
+        document.addEventListener('DOMContentLoaded', async function() {
             createStars();
-            loadUserData();
+            await initDB();
+            await loadUserData();
             updatePlaylistDisplay();
             setupEventListeners();
             
             if (currentUser) {
-                loadPlaylistFromStorage();
+                await loadPlaylistFromStorage();
             }
         });
 
@@ -1093,7 +1245,6 @@
         function playSong() {
             if (!audioElement) return;
             
-            // Если аудиоконтекст приостановлен, возобновляем его
             if (audioContext && audioContext.state === 'suspended') {
                 audioContext.resume();
             }
@@ -1108,6 +1259,7 @@
                 })
                 .catch(error => {
                     console.error('Ошибка воспроизведения:', error);
+                    showNotification('Ошибка воспроизведения трека');
                 });
         }
 
@@ -1154,7 +1306,6 @@
             
             updateActivePlaylistItem();
             
-            // Инициализируем аудиоконтекст при первом взаимодействии
             if (!audioContext) {
                 audioContext = new (window.AudioContext || window.webkitAudioContext)();
             }
@@ -1281,11 +1432,13 @@
         function toggleShuffle() {
             isShuffle = !isShuffle;
             shuffleBtn.classList.toggle('active', isShuffle);
+            showNotification(isShuffle ? 'Перемешивание включено' : 'Перемешивание выключено', 2000);
         }
 
         function toggleRepeat() {
             isRepeat = !isRepeat;
             repeatBtn.classList.toggle('active', isRepeat);
+            showNotification(isRepeat ? 'Повтор включен' : 'Повтор выключен', 2000);
         }
 
         function handleSongEnd() {
@@ -1354,14 +1507,15 @@
             });
         }
 
-        function addToPlaylist(songData) {
+        async function addToPlaylist(songData) {
             userPlaylist.push(songData);
             updatePlaylistDisplay();
-            savePlaylistToStorage();
+            await savePlaylistToStorage();
             updateProfileStats();
+            showNotification('Трек добавлен в плейлист');
         }
 
-        function removeFromPlaylist(index) {
+        async function removeFromPlaylist(index) {
             if (index === currentSongIndex) {
                 if (audioElement) {
                     audioElement.pause();
@@ -1377,8 +1531,9 @@
             
             userPlaylist.splice(index, 1);
             updatePlaylistDisplay();
-            savePlaylistToStorage();
+            await savePlaylistToStorage();
             updateProfileStats();
+            showNotification('Трек удален из плейлиста');
         }
 
         // Функции для работы с файлами
@@ -1406,7 +1561,7 @@
             selectedFiles = Array.from(files).filter(file => file.type === 'audio/mpeg');
             
             if (selectedFiles.length === 0) {
-                alert('Пожалуйста, выберите MP3 файлы');
+                showNotification('Пожалуйста, выберите MP3 файлы');
                 return;
             }
             
@@ -1429,15 +1584,21 @@
                 
                 uploadedFiles.appendChild(fileItem);
             });
+            
+            showNotification(`Выбрано ${selectedFiles.length} файлов`);
         }
 
         function addFilesToPlaylist() {
             if (selectedFiles.length === 0) {
-                alert('Пожалуйста, выберите файлы для загрузки');
+                showNotification('Пожалуйста, выберите файлы для загрузки');
                 return;
             }
             
-            // Показываем индикатор загрузки
+            if (!currentUser) {
+                showNotification('Пожалуйста, войдите в аккаунт для загрузки музыки');
+                return;
+            }
+            
             uploadBtn.innerHTML = '<div class="loading"></div> Обработка файлов...';
             uploadBtn.disabled = true;
             
@@ -1446,18 +1607,15 @@
             selectedFiles.forEach(file => {
                 const url = URL.createObjectURL(file);
                 
-                // Используем правильный способ извлечения обложки
                 extractMetadata(file, url)
                     .then(songData => {
                         addToPlaylist(songData);
                         processedFiles++;
                         
                         if (processedFiles === selectedFiles.length) {
-                            // Все файлы обработаны
                             uploadBtn.innerHTML = '<i class="fas fa-upload"></i> Добавить в плейлист';
                             uploadBtn.disabled = false;
                             
-                            // Очищаем список выбранных файлов
                             selectedFiles = [];
                             uploadedFiles.innerHTML = '';
                             fileInput.value = '';
@@ -1466,7 +1624,6 @@
                     .catch(error => {
                         console.error('Ошибка обработки файла:', error);
                         
-                        // Добавляем файл с базовой информацией
                         const songData = {
                             title: file.name.replace('.mp3', ''),
                             artist: 'Неизвестный исполнитель',
@@ -1499,12 +1656,10 @@
                         const arrayBuffer = e.target.result;
                         const bytes = new Uint8Array(arrayBuffer);
                         
-                        // Базовые метаданные
                         let title = file.name.replace('.mp3', '');
                         let artist = 'Неизвестный исполнитель';
                         let cover = null;
                         
-                        // Поиск ID3 тегов
                         let id3Position = findID3Position(bytes);
                         
                         if (id3Position !== -1) {
@@ -1533,7 +1688,6 @@
 
         // Поиск позиции ID3 тега
         function findID3Position(bytes) {
-            // Ищем сигнатуру ID3 (49 44 33 в hex)
             for (let i = 0; i < bytes.length - 2; i++) {
                 if (bytes[i] === 0x49 && bytes[i+1] === 0x44 && bytes[i+2] === 0x33) {
                     return i;
@@ -1551,23 +1705,18 @@
             };
             
             try {
-                // Пропускаем сигнатуру "ID3"
                 let offset = position + 3;
-                
-                // Версия ID3v2
                 const version = bytes[offset];
-                offset += 2; // Пропускаем версию и флаги
+                offset += 2;
                 
-                // Размер тега (синх-safe integer)
                 const size = (bytes[offset] << 21) | (bytes[offset+1] << 14) | 
                            (bytes[offset+2] << 7) | bytes[offset+3];
                 offset += 4;
                 
                 const endPosition = position + 10 + size;
                 
-                // Читаем фреймы
                 while (offset < endPosition - 10) {
-                    if (bytes[offset] === 0) break; // Конец тегов
+                    if (bytes[offset] === 0) break;
                     
                     const frameID = String.fromCharCode(
                         bytes[offset], bytes[offset+1], bytes[offset+2], bytes[offset+3]
@@ -1576,18 +1725,17 @@
                     const frameSize = (bytes[offset+4] << 24) | (bytes[offset+5] << 16) | 
                                    (bytes[offset+6] << 8) | bytes[offset+7];
                     
-                    offset += 10; // Пропускаем заголовок фрейма
+                    offset += 10;
                     
                     if (frameSize <= 0 || offset + frameSize > bytes.length) {
                         break;
                     }
                     
-                    // Обрабатываем конкретные фреймы
-                    if (frameID === 'TIT2') { // Название трека
+                    if (frameID === 'TIT2') {
                         result.title = parseTextFrame(bytes, offset, frameSize);
-                    } else if (frameID === 'TPE1') { // Исполнитель
+                    } else if (frameID === 'TPE1') {
                         result.artist = parseTextFrame(bytes, offset, frameSize);
-                    } else if (frameID === 'APIC') { // Обложка
+                    } else if (frameID === 'APIC') {
                         result.cover = parsePictureFrame(bytes, offset, frameSize);
                     }
                     
@@ -1603,14 +1751,13 @@
         // Парсинг текстовых фреймов
         function parseTextFrame(bytes, offset, size) {
             try {
-                // Пропускаем кодировку (1 байт)
                 const encoding = bytes[offset];
                 offset++;
                 
                 let text = '';
                 for (let i = 0; i < size - 1; i++) {
                     const charCode = bytes[offset + i];
-                    if (charCode === 0) break; // Конец строки
+                    if (charCode === 0) break;
                     text += String.fromCharCode(charCode);
                 }
                 
@@ -1623,31 +1770,25 @@
         // Парсинг фрейма с изображением
         function parsePictureFrame(bytes, offset, size) {
             try {
-                // Пропускаем кодировку (1 байт)
                 const encoding = bytes[offset];
                 offset++;
                 
-                // Пропускаем MIME type (до нулевого байта)
                 while (offset < bytes.length && bytes[offset] !== 0) {
                     offset++;
                 }
-                offset++; // Пропускаем нулевой байт
-                
-                // Пропускаем тип картинки (1 байт)
                 offset++;
                 
-                // Пропускаем описание (до нулевого байта)
+                offset++;
+                
                 while (offset < bytes.length && bytes[offset] !== 0) {
                     offset++;
                 }
-                offset++; // Пропускаем нулевой байт
+                offset++;
                 
-                // Оставшиеся байты - данные изображения
                 const imageData = bytes.subarray(offset, offset + (size - (offset - (offset - size))));
                 
                 if (imageData.length > 0) {
-                    // Определяем тип изображения по первым байтам
-                    let mimeType = 'image/jpeg'; // По умолчанию JPEG
+                    let mimeType = 'image/jpeg';
                     
                     if (imageData[0] === 0x89 && imageData[1] === 0x50 && 
                         imageData[2] === 0x4E && imageData[3] === 0x47) {
@@ -1667,60 +1808,83 @@
         }
 
         // Функции для работы с пользователем
-        function handleLogin() {
+        async function handleLogin() {
             const email = document.getElementById('loginEmail').value;
             const password = document.getElementById('loginPassword').value;
             
             if (!email || !password) {
-                alert('Пожалуйста, заполните все поля');
+                showNotification('Пожалуйста, заполните все поля');
                 return;
             }
             
-            currentUser = {
-                id: Date.now(),
-                name: email.split('@')[0],
-                email: email,
-                avatar: email.charAt(0).toUpperCase()
-            };
-            
-            saveUserData();
-            updateUIForUser();
-            hideModal(loginModal);
-            loadPlaylistFromStorage();
+            try {
+                const user = await getUserByEmail(email);
+                
+                if (!user) {
+                    showNotification('Пользователь не найден');
+                    return;
+                }
+                
+                if (user.password !== password) {
+                    showNotification('Неверный пароль');
+                    return;
+                }
+                
+                currentUser = user;
+                await saveUserData();
+                updateUIForUser();
+                hideModal(loginModal);
+                await loadPlaylistFromStorage();
+                showNotification(`Добро пожаловать, ${user.name}!`);
+            } catch (error) {
+                console.error('Ошибка входа:', error);
+                showNotification('Ошибка входа в систему');
+            }
         }
 
-        function handleRegister() {
+        async function handleRegister() {
             const name = document.getElementById('registerName').value;
             const email = document.getElementById('registerEmail').value;
             const password = document.getElementById('registerPassword').value;
             
             if (!name || !email || !password) {
-                alert('Пожалуйста, заполните все поля');
+                showNotification('Пожалуйста, заполните все поля');
                 return;
             }
             
-            currentUser = {
-                id: Date.now(),
-                name: name,
-                email: email,
-                avatar: name.charAt(0).toUpperCase()
-            };
-            
-            saveUserData();
-            updateUIForUser();
-            hideModal(registerModal);
-            userPlaylist = [];
-            savePlaylistToStorage();
-            updatePlaylistDisplay();
+            try {
+                const existingUser = await getUserByEmail(email);
+                if (existingUser) {
+                    showNotification('Пользователь с таким email уже существует');
+                    return;
+                }
+                
+                const userData = {
+                    name: name,
+                    email: email,
+                    password: password,
+                    avatar: name.charAt(0).toUpperCase(),
+                    createdAt: new Date()
+                };
+                
+                const userId = await registerUser(userData);
+                userData.id = userId;
+                currentUser = userData;
+                
+                await saveUserData();
+                updateUIForUser();
+                hideModal(registerModal);
+                userPlaylist = [];
+                await savePlaylistToStorage();
+                updatePlaylistDisplay();
+                showNotification(`Аккаунт создан! Добро пожаловать, ${name}!`);
+            } catch (error) {
+                console.error('Ошибка регистрации:', error);
+                showNotification('Ошибка создания аккаунта');
+            }
         }
 
-        function handleLogout() {
-            currentUser = null;
-            userPlaylist = [];
-            saveUserData();
-            updateUIForUser();
-            hideModal(profileModal);
-            
+        async function handleLogout() {
             if (audioElement) {
                 audioElement.pause();
                 stopVisualizer();
@@ -1729,6 +1893,12 @@
                 playIcon.classList.add('fa-play');
             }
             
+            currentUser = null;
+            userPlaylist = [];
+            await saveUserData();
+            updateUIForUser();
+            hideModal(profileModal);
+            
             songTitle.textContent = 'Выберите трек';
             songArtist.textContent = 'Ваш плейлист';
             albumArt.innerHTML = '<i class="fas fa-music"></i>';
@@ -1736,6 +1906,8 @@
             currentTimeEl.textContent = '0:00';
             totalTimeEl.textContent = '0:00';
             updatePlaylistDisplay();
+            
+            showNotification('Вы вышли из аккаунта');
         }
 
         function updateUIForUser() {
@@ -1762,34 +1934,41 @@
         }
 
         // Функции для работы с локальным хранилищем
-        function saveUserData() {
+        async function saveUserData() {
             if (currentUser) {
-                localStorage.setItem('flautPlayer_user', JSON.stringify(currentUser));
+                localStorage.setItem('flautPlayer_currentUser', JSON.stringify(currentUser));
             } else {
-                localStorage.removeItem('flautPlayer_user');
+                localStorage.removeItem('flautPlayer_currentUser');
             }
         }
 
-        function loadUserData() {
-            const userData = localStorage.getItem('flautPlayer_user');
+        async function loadUserData() {
+            const userData = localStorage.getItem('flautPlayer_currentUser');
             if (userData) {
                 currentUser = JSON.parse(userData);
                 updateUIForUser();
             }
         }
 
-        function savePlaylistToStorage() {
-            if (currentUser) {
-                localStorage.setItem(`flautPlayer_playlist_${currentUser.id}`, JSON.stringify(userPlaylist));
+        async function savePlaylistToStorage() {
+            if (currentUser && db) {
+                try {
+                    await savePlaylist(currentUser.id, userPlaylist);
+                } catch (error) {
+                    console.error('Ошибка сохранения плейлиста:', error);
+                }
             }
         }
 
-        function loadPlaylistFromStorage() {
-            if (currentUser) {
-                const playlistData = localStorage.getItem(`flautPlayer_playlist_${currentUser.id}`);
-                if (playlistData) {
-                    userPlaylist = JSON.parse(playlistData);
+        async function loadPlaylistFromStorage() {
+            if (currentUser && db) {
+                try {
+                    userPlaylist = await getPlaylist(currentUser.id);
                     updatePlaylistDisplay();
+                } catch (error) {
+                    console.error('Ошибка загрузки плейлиста:', error);
+                    userPlaylist = [];
+                updatePlaylistDisplay();
                 }
             }
         }
@@ -1809,6 +1988,19 @@
 
         function hideModal(modal) {
             modal.style.display = 'none';
+        }
+
+        // Регистрация Service Worker для PWA
+        if ('serviceWorker' in navigator) {
+            window.addEventListener('load', () => {
+                navigator.serviceWorker.register('/sw.js')
+                    .then((registration) => {
+                        console.log('SW registered: ', registration);
+                    })
+                    .catch((registrationError) => {
+                        console.log('SW registration failed: ', registrationError);
+                    });
+            });
         }
     </script>
 </body>
